@@ -95,13 +95,50 @@ rmdir "%APPDATA%\dsh-desktop\harness\profiles\desktop\node_modules\dsh-session-s
 
 删掉后官方 `session-query-sqlite` 会用回 base 默认的 `openAt: never`（即侧栏只搜标题）。
 
+## 宿主升级到 asar 打包之后（0.2.x）
+
+从某版开始，DSH 把应用打进 `resources/app.asar`，宿主包位于
+`app.asar/dsh/node_modules/@deepseek-ai/*`，**插件目录的 node_modules 里不再有这些包**
+（升级前它们是指向宿主的 junction，升级后消失）。此时插件入口里任何
+`import ... from "@deepseek-ai/dsh-session-query"` 都会在加载期抛
+`ERR_MODULE_NOT_FOUND`，插件静默不加载；而本插件的 patch 又用 `disabled: true`
+关掉了官方 `session-query-sqlite`，于是 `sessionQuery` 无人提供 →
+`sessionController` 报 service-unavailable → **新建会话直接失败**。
+
+解决方式是 `lib/host.js`：在运行时按
+`process.resourcesPath/app.asar/dsh/node_modules`（再回退 `app.asar.unpacked`、
+`app`、逐级 `node_modules`）定位包，读它的 `package.json` 取 `exports`/`main`，
+再用 `import(pathToFileURL(entry))` 动态加载。宿主主进程的 `node:fs` 带 asar 补丁，
+所以能读 asar 内的文件；用同一个 file URL import 会命中宿主的 ESM 缓存，
+拿到的是**同一份** cordis / `Service`，`sessionQuery` 注册才生效。
+
+因此插件入口不是默认导出 class，而是：
+
+```js
+export const inject = ["sessions"];
+export async function apply(ctx, config) { /* 动态加载宿主 → 定义子类 → ctx.plugin */ }
+```
+
+### 如果升级后又起不来
+
+1. 看 `<db 目录>/session-search-pro.log`，最后一行的 `[applyFailed]` 会写清是哪个包没定位到。
+2. 紧急恢复会话功能：删掉本包 `cordis.patch.yml` 里
+   `- id: session-query-sqlite` / `disabled: true` 两行，官方引擎即恢复
+   （代价：中文内容搜索回到 0 命中，侧栏只搜标题）。
+
 ## 自测
 
-```bash
-node test/probe.mjs        # SQL 层：分词、转义、聚合、重建、snippet（22 条判据）
-node test/engine-smoke.mjs # 引擎层：构造、Config 归一、无依赖降级、disabled 语义（14 条）
-node test/engine-live.mjs  # 真语料：索引 656 个会话并查询（慢，需要 DSH 的 sessions 目录）
+宿主包现在只在 asar 里，`apply-*` 与 `engine-*` 三个探针必须用 Electron 的 node 模式跑
+（普通 `node` 读不了 asar）：
+
+```powershell
+$env:ELECTRON_RUN_AS_NODE = "1"
+& "<安装目录>\DeepSeek Harness.exe" test/apply-smoke.mjs   # 宿主包定位 + apply 挂载（7 条）
+& "<安装目录>\DeepSeek Harness.exe" test/engine-smoke.mjs  # 服务注册、Config 归一、disabled 语义（12 条）
+& "<安装目录>\DeepSeek Harness.exe" test/engine-live.mjs   # 真语料：索引 657 个会话并查询（慢）
 ```
+
+`node test/probe.mjs` 只依赖 `lib/sql.js`，普通 node 即可（22 条判据）。
 
 ## License
 

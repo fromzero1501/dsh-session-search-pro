@@ -9,8 +9,9 @@
 #   path        索引库路径，默认 <DSH_HOME>/cache/session-search-pro.db
 #   openAt      startup | first-search | never（never = 彻底关闭内容检索）
 #   defaultLimit / maxLimit / snippetChars
-- id: session-query-sqlite
-  disabled: true
+# 2026-11-11 停用：关掉官方 session-query-sqlite 会让 sessionController 服务不可用（新建会话报 service-unavailable）
+# - id: session-query-sqlite
+#   disabled: true
 
 - insert:
     - id: session-search-pro
