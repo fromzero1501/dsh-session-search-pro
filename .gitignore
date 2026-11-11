@@ -7,3 +7,5 @@ node_modules/
 Thumbs.db
 
 live-run.txt
+*.bak
+*.bak-*
