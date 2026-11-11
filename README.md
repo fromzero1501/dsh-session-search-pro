@@ -11,7 +11,8 @@
 | 问题 | 官方行为 | 本插件 |
 |---|---|---|
 | 中文分词 | FTS5 `tokenize='unicode61'` 把一整段连续汉字当一个 token，搜「插件」「搜索」**0 命中且不报错** | `trigram`，≥3 字符命中；<3 字符自动走 `LIKE` 兜底 |
-| 索引内容 | `user/message`、`assistant/message`、`tool/call`、`tool/result`、`todo/write`、`turn/end` 全收 | **只收 `user/message`** —— 你要找的是自己说过的话，索引体积小一个数量级 |
+| 索引内容 | `user/message`、`assistant/message`、`tool/call`、`tool/result`、`todo/write`、`turn/end` 全收 | **只收「用户自己打的字」** —— 索引体积小一个数量级（23 倍） |
+| 注入块混进索引 | `user/message` 这个槽位被宿主复用：`runtime-context`、`skill-catalog`、`agent-instructions`、`time-context` 等 18 种注入块都以 `user/message` 落盘，官方把它们当用户发言索引 | 按 `data.source.kind === "user"` 白名单，只认真人发言；子代理会话（`delegationDepth > 0`）整体跳过 |
 | 单个坏会话 | 读取错误无容错，一个损坏的 jsonl 让整轮索引失败，宿主吞错后静默回落为「只搜标题」 | 该会话标 `status=0` 永久跳过，其余照常索引 |
 | 磁盘快照稳定 | 要求读前读后快照完全一致才写库；当前正在对话的会话每几秒追加一次，**4 次重试耗尽即抛 `SESSION_QUERY_PERSISTENCE_FAILED`** | 本轮变动过的会话留到下一轮，不整轮重试 —— 对话进行中也能搜 |
 
@@ -69,20 +70,33 @@ mklink /J "%APPDATA%\dsh-desktop\harness\profiles\desktop\node_modules\dsh-sessi
 
 ## 性能基线
 
-真实语料（656 个会话、21,450 条用户消息、宿主日志合计 418 MB）：
+真实语料（629 个会话文件、21,583 条 `user/message`、宿主日志合计 418 MB）：
 
-- **首次索引 60–90 秒**（一次性，之后复用索引）
-- 二次搜索 **0.6–17 秒**（取决于残留会话的增量对账量）
+| 口径 | 索引会话 | 索引文档 | 首次索引 | 二次搜索 |
+|---|---|---|---|---|
+| 只收 `user/message`（v1） | 660 | 21,583 | 130 秒 | 0.99 秒 |
+| 再按 `source.kind` 白名单 + 跳过子代理（v2） | 373 | 3,023 | 20.4 秒 | **2 毫秒** |
+
 - ≥3 字符中文 → FTS5 `MATCH`，亚毫秒
-- 2 字符中文 → `LIKE '%…%'` 扫 2 万条文档，100–200 毫秒
+- 2 字符中文 → `LIKE '%…%'` 扫 3 千条文档，几十毫秒
 
 首次索引慢是因为要解压全部会话并做 `Session.create` 重放校验。这是必要成本：不重放就存在把损坏日志当正常内容索引进去的风险。
 
+一个实测对照（搜「点名」）：
+
+| 版本 | 命中会话 | 命中文档 |
+|---|---|---|
+| 官方 / v1（把注入块当用户发言） | 427 | 2,469 |
+| v2（只认 `source.kind === "user"`） | **2** | **2** |
+
+差别来自用户级 `MEMORY.md` 里「在提示词里点名」那句话：它每轮被注入进 `runtime-context` 块，而官方索引把它当成用户发言，于是任何查询都会命中几百个会话。
+
 ## 已知限制
 
-- 只能搜**用户发言**。想连 assistant 回复一起搜，把 `lib/index.js` 里 `_documentsOf` 的 `event?.type !== USER_MESSAGE_TYPE` 判据去掉。
+- 只能搜**用户自己打的字**。想连 assistant 回复一起搜，把 `lib/index.js` 里 `_documentsOf` 的 `event?.type !== USER_MESSAGE_TYPE` 判据去掉。
+- `source.kind` 白名单是硬编码的。宿主将来新增注入 kind 不会误进来（默认拒），但如果哪天真人发言换了 kind 名，会静默搜不到 —— 届时看 `_documentsOf` 与 `sourceKindOf`。
 - `trigram` 对 2 字符以下的中文只能靠 `LIKE`，文档量再涨一个数量级会变慢。
-- 索引是派生物：删掉 `cache/session-search-pro.db` 会重建，不影响任何会话数据。
+- 索引是派生物：`SCHEMA_VERSION` 变了会整库重建，不影响任何会话数据。
 - 只在 Windows + DSH 0.2.x 上验证过。
 
 ## 卸载
