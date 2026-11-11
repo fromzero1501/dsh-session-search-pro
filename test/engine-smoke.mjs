@@ -7,6 +7,9 @@
  * 真实索引行为由宿主重启后的验收探针负责。
  */
 import { Context } from "@deepseek-ai/cordis";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import Engine from "../lib/index.js";
 
 const checks = [];
@@ -34,11 +37,16 @@ check("Config 归一：limits", engine?.config?.defaultLimit === 20 && engine?.c
 check("Config 归一：snippetChars", engine?.config?.snippetChars === 240);
 check("可选 persistence 未就绪时不抛错", engine?._persistence() === void 0);
 check("没有 persistence 时搜索返回空而不是抛错", await (async () => {
+	// 必须用临时库：默认库会落到真实 harness 目录，那里可能早有索引，
+	// 断言「空结果」就会因为读到别人的索引而假红。
+	const isolated = new Engine(new Context(), { path: join(mkdtempSync(join(tmpdir(), "ssp-smoke-")), "a.db"), openAt: "first-search" });
 	try {
-		const result = await engine.searchSessions({ query: "冒烟" });
+		const result = await isolated.searchSessions({ query: "冒烟" });
 		return Array.isArray(result?.items) && result.items.length === 0;
 	} catch (cause) {
 		return `抛错: ${cause?.code ?? ""} ${cause?.message ?? cause}`;
+	} finally {
+		isolated.close();
 	}
 })() === true);
 check("searchEvents 缺 sessionId 时抛参数错误", await (async () => {

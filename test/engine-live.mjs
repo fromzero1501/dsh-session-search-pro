@@ -8,7 +8,7 @@ import { Context } from "@deepseek-ai/cordis";
 import * as jsonl from "@deepseek-ai/dsh-session-persistence-jsonl";
 import { DatabaseSync } from "node:sqlite";
 import { mkdtemp, rm } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Engine from "../lib/index.js";
@@ -22,7 +22,8 @@ function check(name, condition, detail) {
 }
 
 const workspace = await mkdtemp(join(tmpdir(), "dssp-live-"));
-const databasePath = join(workspace, "live.db");
+// 给了 SSP_LIVE_DB 就复用那份库：第一次跑建索引，第二次跑验增量与缓存。
+const databasePath = process.env.SSP_LIVE_DB ?? join(workspace, "live.db");
 
 try {
 	check("sessions 目录存在", existsSync(SESSIONS_ROOT), SESSIONS_ROOT);
@@ -64,6 +65,13 @@ try {
 	}
 
 	engine.close();
+
+	const logPath = join(workspace, "session-search-pro.log");
+	if (existsSync(logPath)) {
+		const lines = readFileSync(logPath, "utf8").trim().split("\n");
+		console.log(`--- 日志 ${lines.length} 行，尾部 20 行 ---`);
+		for (const line of lines.slice(-20)) console.log(line);
+	}
 } finally {
 	await rm(workspace, { recursive: true, force: true });
 }
