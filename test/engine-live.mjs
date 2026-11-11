@@ -1,0 +1,74 @@
+/**
+ * 真语料联调：拿宿主的真实 sessions 目录做一次完整索引 + 查询。
+ *
+ * 这一层比 probe.mjs 重，但能证明"引擎 + 真实 persistence + 真实 zstd 多帧日志"
+ * 三者接得上；不覆盖的只有 cordis 的 inject 绑定（那必须由宿主验证）。
+ */
+import { Context } from "@deepseek-ai/cordis";
+import * as jsonl from "@deepseek-ai/dsh-session-persistence-jsonl";
+import { DatabaseSync } from "node:sqlite";
+import { mkdtemp, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import Engine from "../lib/index.js";
+
+const SESSIONS_ROOT = "C:\\Users\\Administrator\\AppData\\Roaming\\dsh-desktop\\harness\\sessions";
+const QUERY = process.argv[2] ?? "插件";
+
+const checks = [];
+function check(name, condition, detail) {
+	checks.push({ name, ok: Boolean(condition), detail });
+}
+
+const workspace = await mkdtemp(join(tmpdir(), "dssp-live-"));
+const databasePath = join(workspace, "live.db");
+
+try {
+	check("sessions 目录存在", existsSync(SESSIONS_ROOT), SESSIONS_ROOT);
+	const ctx = new Context();
+	ctx.plugin({ name: "live-persistence", apply: jsonl.apply, Config: jsonl.Config }, { root: SESSIONS_ROOT });
+	const engine = new Engine(ctx, { path: databasePath, openAt: "first-search" });
+
+	const startedAt = Date.now();
+	const first = await engine.searchSessions({ query: QUERY, limit: 5 });
+	const firstMs = Date.now() - startedAt;
+	console.log(`首次搜索 ${firstMs} ms，命中 ${first.items.length} 条（hasMore=${first.nextCursor !== void 0}）`);
+	// inject 回调是异步的，构造后同步读到的一定是 undefined，搜索跑完才有定论
+	check("persistence 已绑定", engine._persistence() !== void 0);
+
+	const db = new DatabaseSync(databasePath, { readOnly: true });
+	const sessions = db.prepare("SELECT COUNT(*) c FROM indexed_sessions").get().c;
+	const docs = db.prepare("SELECT COUNT(*) c FROM docs").get().c;
+	const skipped = db.prepare("SELECT COUNT(*) c FROM indexed_sessions WHERE status = 0").get().c;
+	db.close();
+	console.log(`索引：会话 ${sessions} 个、文档 ${docs} 条、跳过 ${skipped} 个`);
+
+	check("索引写入了会话", sessions > 0, `实际 ${sessions}`);
+	check("索引写入了文档", docs > 0, `实际 ${docs}`);
+	check("搜索有命中", first.items.length > 0, `实际 ${first.items.length} 条`);
+	check("命中项有 header", typeof first.items[0]?.header?.id === "string");
+	check("命中项有 snippet", typeof first.items[0]?.bestMatch?.snippet === "string" && first.items[0].bestMatch.snippet.length > 0);
+	check("命中项带高亮标记或包含查询词", first.items.length === 0 || first.items.some((item) => item.bestMatch.snippet.includes(QUERY)));
+
+	const secondStartedAt = Date.now();
+	const second = await engine.searchSessions({ query: QUERY, limit: 5 });
+	const secondMs = Date.now() - secondStartedAt;
+	console.log(`二次搜索 ${secondMs} ms`);
+	check("二次搜索命中一致", second.items.length === first.items.length, `${first.items.length} vs ${second.items.length}`);
+	check("二次搜索明显更快", secondMs < Math.max(600, firstMs / 2), `${firstMs} → ${secondMs}`);
+
+	if (first.nextCursor !== void 0) {
+		const page2 = await engine.searchSessions({ query: QUERY, limit: 5, cursor: first.nextCursor });
+		check("翻页可用", Array.isArray(page2.items));
+	}
+
+	engine.close();
+} finally {
+	await rm(workspace, { recursive: true, force: true });
+}
+
+const failed = checks.filter((item) => !item.ok);
+for (const item of checks) console.log(`${item.ok ? "PASS" : "FAIL"}  ${item.name}${item.ok || item.detail === void 0 ? "" : ` — ${item.detail}`}`);
+console.log(failed.length === 0 ? `LIVE_PASS ${checks.length}/${checks.length}` : `LIVE_FAIL pass=${checks.length - failed.length} fail=${failed.length}`);
+if (failed.length > 0) process.exitCode = 1;

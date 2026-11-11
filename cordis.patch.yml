@@ -1,0 +1,20 @@
+# dsh-session-search-pro bundle patch
+#
+# 两件事：
+#   1. 关闭官方 @deepseek-ai/dsh-session-query-sqlite（它用 unicode61 分词，中文查不到，
+#      而且要求磁盘快照前后完全一致，对话进行中必然失败）。
+#   2. 插入本插件作为 ctx.sessionQuery 的唯一后端。
+#
+# 可调参数（改 profile 的 cordis.patch.yml 里同 id 行即可覆盖）：
+#   path        索引库路径，默认 <DSH_HOME>/cache/session-search-pro.db
+#   openAt      startup | first-search | never（never = 彻底关闭内容检索）
+#   defaultLimit / maxLimit / snippetChars
+- id: session-query-sqlite
+  disabled: true
+
+- insert:
+    - id: session-search-pro
+      name: 'dsh-session-search-pro'
+      config:
+        path: !!js dshHomePath('cache/session-search-pro.db')
+        openAt: first-search
